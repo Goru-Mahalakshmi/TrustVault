@@ -8,3 +8,10 @@ storage/
 .mutation_backup/
 .mutation_results.jsonl
 .env.prod
+.env.*
+!.env.example
+!.env.prod.example
+
+*.pem
+*.key
+secrets/

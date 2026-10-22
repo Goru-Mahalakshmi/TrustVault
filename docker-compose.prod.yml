@@ -1,0 +1,59 @@
+# Production stack: Caddy (automatic HTTPS) -> api -> PostgreSQL.  See DEPLOY.md.
+# Two database roles on purpose: `migrate` holds the OWNER credential and exits; `api` only ever sees the APP credential.
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in .env.prod}
+      OWNER_DB_PASSWORD: ${OWNER_DB_PASSWORD:?set in .env.prod}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set in .env.prod}
+    volumes:
+      - ./docker/initdb-prod:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trustvault"]
+      interval: 3s
+      retries: 30
+    # no published ports: only the other containers can reach the database
+
+  migrate:
+    build: .
+    command: ["python", "-m", "scripts.init_db"]
+    environment:
+      OWNER_DATABASE_URL: postgresql+asyncpg://trustvault_owner:${OWNER_DB_PASSWORD}@db:5432/trustvault
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://trustvault_app:${APP_DB_PASSWORD}@db:5432/trustvault
+      STORAGE_DIR: /data/storage
+    volumes:
+      - files:/data/storage
+      - anchors:/anchors
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set in .env.prod}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  files:
+  anchors:
+  caddy_data:

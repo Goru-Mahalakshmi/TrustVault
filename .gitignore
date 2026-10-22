@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+storage/
+*.db
+.env
+.mutation_backup/
+.mutation_results.jsonl
+.env.prod

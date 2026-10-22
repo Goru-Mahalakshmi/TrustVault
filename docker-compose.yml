@@ -1,0 +1,17 @@
+# Local PostgreSQL for development and for the test suite (port 5433 so it never clashes with a local install).
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres            # bootstrap superuser: used only by the init script, never by app or tests
+      POSTGRES_PASSWORD: postgres_dev_only
+    ports: ["5433:5432"]
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+volumes:
+  pgdata:

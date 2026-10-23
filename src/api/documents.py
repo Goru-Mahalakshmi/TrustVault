@@ -11,9 +11,9 @@ from src.api.deps import AuthContext, current_auth, audit, client_meta
 from src.core import crypto, uploads
 from src.core.config import settings
 from src.db.session import get_db
-from src.models.document import Document, DocumentVersion, Grant
+from src.models.document import AiSuggestion, Document, DocumentVersion, Grant
 from src.models.user import User
-from src.schemas.document import GrantCreate, GrantRead, TransferRequest
+from src.schemas.document import DecisionIn, GrantCreate, GrantRead, TransferRequest
 from src.services import ai_service
 from src.services.audit_service import log_refusal
 from src.services.authz import Action, authorize, still_authorized
@@ -250,6 +250,25 @@ async def list_grants(doc_id: uuid.UUID, request: Request, ctx: AuthContext = De
     await db.commit()
     return rows
 
+async def _issue_grant(db, ctx, request, doc, target, level, expires_at) -> Grant:
+    """Creates the grant and its audit row in the caller's transaction (caller commits). Used by BOTH the plain grant
+    endpoint and the AI decision endpoint, so an AI-assisted grant is exactly as constrained as a manual one."""
+    if target.id == ctx.user_id:
+        raise HTTPException(400, "You cannot grant access to yourself")
+    exp = expires_at
+    if exp is not None:
+        exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
+        if exp <= datetime.now(timezone.utc):
+            raise HTTPException(400, "expires_at must be in the future")
+    now = datetime.now(timezone.utc)
+    await db.execute(update(Grant).where(Grant.document_id == doc.id, Grant.grantee_user_id == target.id,
+                                         Grant.revoked_at.is_(None)).values(revoked_at=now))  # one live grant per user
+    g = Grant(document_id=doc.id, grantee_user_id=target.id, level=level, granted_by=ctx.user_id, expires_at=exp)
+    db.add(g); await db.flush()
+    await audit(db, ctx, request, "PERMISSION_GRANT", "document", doc.id, document_id=str(doc.id),
+                grantee_user_id=str(target.id), grant_id=str(g.id), level=level)
+    return g
+
 @router.post("/{doc_id}/grants", status_code=201)
 async def create_grant(doc_id: uuid.UUID, body: GrantCreate, request: Request,
                        ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depends(get_db)):
@@ -260,20 +279,7 @@ async def create_grant(doc_id: uuid.UUID, body: GrantCreate, request: Request,
         await audit(db, ctx, request, "PERMISSION_GRANT_FAILED", "document", doc.id, document_id=str(doc.id))
         await db.commit()
         raise HTTPException(404, "Target user not found")
-    if target.id == ctx.user_id:
-        raise HTTPException(400, "You cannot grant access to yourself")
-    exp = body.expires_at
-    if exp is not None:
-        exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
-        if exp <= datetime.now(timezone.utc):
-            raise HTTPException(400, "expires_at must be in the future")
-    now = datetime.now(timezone.utc)
-    await db.execute(update(Grant).where(Grant.document_id == doc.id, Grant.grantee_user_id == target.id,
-                                         Grant.revoked_at.is_(None)).values(revoked_at=now))  # one live grant per user
-    g = Grant(document_id=doc.id, grantee_user_id=target.id, level=body.level, granted_by=ctx.user_id, expires_at=exp)
-    db.add(g); await db.flush()
-    await audit(db, ctx, request, "PERMISSION_GRANT", "document", doc.id, document_id=str(doc.id),
-                grantee_user_id=str(target.id), grant_id=str(g.id), level=body.level)
+    g = await _issue_grant(db, ctx, request, doc, target, body.level, body.expires_at)
     await db.commit()
     return {"grant_id": str(g.id), "level": g.level}
 
@@ -352,7 +358,50 @@ async def grantee_suggestions(doc_id: uuid.UUID, request: Request, ctx: AuthCont
     if not settings.ANTHROPIC_API_KEY:
         raise HTTPException(503, "AI suggestions are not configured")
     suggestions = await ai_service.suggest_grantees(db, doc, ctx.user_id)
+    rec = AiSuggestion(document_id=doc.id, owner_id=ctx.user_id,
+                       items=[{"user_id": x["user_id"], "reason": x["reason"], "status": "pending"} for x in suggestions])
+    db.add(rec); await db.flush()
     await audit(db, ctx, request, "AI_GRANTEE_SUGGESTION", "document", doc.id, document_id=str(doc.id),
-                count=len(suggestions))
+                suggestion_id=str(rec.id), count=len(suggestions))
+    for x in suggestions:                                    # the suggestions themselves, as ids only (never the model's text)
+        await audit(db, ctx, request, "AI_SUGGESTED_GRANTEE", "document", doc.id, document_id=str(doc.id),
+                    suggestion_id=str(rec.id), user_id=x["user_id"])
     await db.commit()
-    return {"advisory_only": True, "suggestions": suggestions}   # owner must still confirm via POST /grants
+    return {"advisory_only": True, "suggestion_id": str(rec.id), "suggestions": suggestions}   # nothing was granted
+
+@router.post("/{doc_id}/grantee-suggestions/{suggestion_id}/decisions")
+async def decide_suggestion(doc_id: uuid.UUID, suggestion_id: uuid.UUID, body: DecisionIn, request: Request,
+                            ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depends(get_db)):
+    """The ONLY way a suggestion can lead to access: the owner, with a session + CSRF token, decides per person."""
+    doc = await authorize(db, ctx, request, doc_id, Action.GRANT)
+    rec = (await db.execute(select(AiSuggestion).where(
+        AiSuggestion.id == suggestion_id, AiSuggestion.document_id == doc.id, AiSuggestion.owner_id == ctx.user_id)
+        .with_for_update())).scalar_one_or_none()
+    item = next((i for i in (rec.items if rec else []) if i["user_id"] == str(body.user_id)), None)
+    if rec is None or item is None:                           # unknown suggestion OR a person the AI never suggested
+        raise HTTPException(404, "Suggestion not found")
+    if item["status"] != "pending":
+        raise HTTPException(409, "Suggestion already decided")
+    items = [dict(i) for i in rec.items]
+    item = next(i for i in items if i["user_id"] == str(body.user_id))
+    grant_id = None
+    if body.action == "reject":
+        item["status"] = "rejected"
+        await audit(db, ctx, request, "AI_SUGGESTION_REJECTED", "document", doc.id, document_id=str(doc.id),
+                    suggestion_id=str(rec.id), user_id=str(body.user_id), decision="rejected")
+    else:
+        await enforce_rate_limit(db, request, "grant", settings.RATE_LIMIT_GRANTS_PER_MIN, identifier=str(ctx.user_id))
+        target = (await db.execute(select(User).where(User.id == body.user_id))).scalar_one_or_none()
+        if target is None or not target.is_active:
+            raise HTTPException(409, "Suggested user is no longer available")
+        g = await _issue_grant(db, ctx, request, doc, target, body.level, body.expires_at)
+        grant_id = str(g.id)
+        label = "accepted" if (body.level == "read" and body.expires_at is None) else "modified"
+        item["status"], item["grant_id"] = label, grant_id
+        await audit(db, ctx, request, "AI_SUGGESTION_MODIFIED" if label == "modified" else "AI_SUGGESTION_ACCEPTED",
+                    "document", doc.id, document_id=str(doc.id), suggestion_id=str(rec.id),
+                    user_id=str(body.user_id), grant_id=grant_id, level=body.level, decision=label)
+    item["decided_at"] = datetime.now(timezone.utc).isoformat()
+    rec.items = items
+    await db.commit()
+    return {"decision": item["status"], "grant_id": grant_id}

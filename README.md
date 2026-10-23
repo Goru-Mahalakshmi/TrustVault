@@ -8,7 +8,7 @@ Secure document sharing: per-document grants, instant revocation, envelope encry
     pip install -r requirements.txt
     docker compose up -d                       # PostgreSQL 16 on localhost:5433 (roles + databases created automatically)
     copy .env.example .env                     # then fill MASTER_KEY_B64 and AUDIT_HMAC_KEY
-    python -m pytest -q                        # 129 tests, all on PostgreSQL (refuses to run on SQLite)
+    python -m pytest -q                        # 142 tests, all on PostgreSQL (refuses to run on SQLite)
     set OWNER_DATABASE_URL=postgresql+asyncpg://trustvault_owner:owner_dev_pw@localhost:5433/trustvault
     python -m scripts.init_db                  # schema + grants + audit immutability trigger (as OWNER role)
     uvicorn src.main:app --reload              # UI at http://127.0.0.1:8000
@@ -28,6 +28,13 @@ superuser. A quick NON-authoritative run on SQLite is possible with TV_ALLOW_SQL
 
 ## Deploy
 See **DEPLOY.md** (Docker Compose + Caddy HTTPS, clean clone to live URL, with a verification checklist).
+
+## AI suggestions (advisory only)
+`POST /api/documents/{id}/grantee-suggestions` returns suggested people and grants nothing. The only path to access is
+`POST .../grantee-suggestions/{suggestion_id}/decisions` by the owner (session + CSRF): `grant` (optionally with a level and expiry) or
+`reject`, per person. The server labels each decision itself (accepted = exactly as suggested, modified = anything else). Audit events:
+AI_GRANTEE_SUGGESTION, AI_SUGGESTED_GRANTEE (one per person), AI_SUGGESTION_ACCEPTED / MODIFIED / REJECTED, plus the normal PERMISSION_GRANT.
+Model output is untrusted: ids must be previous grantees of this owner, text is shown as plain text, free-form model text never enters the audit.
 
 ## Mutation check (does the test suite really guard authorisation?)
     python -m scripts.mutation_check            # ~25 min: removes/weakens 61 security checks ONE at a time, reruns the tests
@@ -61,6 +68,5 @@ docker-compose.yml | scripts/ (init_db, make_admin, anchor_audit) | tests/ | THR
 - No Alembic migrations yet (scripts/init_db.py uses create_all + db/hardening.sql).
 - Identical response *timing* for missing vs ungranted documents is designed, not measured.
 - The UI keeps the CSRF token in sessionStorage; strict CSP limits XSS risk but does not remove it.
-- The web UI does not expose the new search filters, facets or version history yet (the API does).
-- AI decisions (accept/reject) are not yet audited; AI requests are, with a count only.
+- The AI sees only a document's title and category plus the names and past categories of people the owner has already shared with. File contents are never sent, so there is no content opt-in.
 - Mutants are chosen by me: passing them is evidence, not proof. A judge may break a check I did not think of.

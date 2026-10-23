@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Boolean, Integer, BigInteger, DateTime, ForeignKey, Uuid, UniqueConstraint, func
+from sqlalchemy import JSON, String, Boolean, Integer, BigInteger, DateTime, ForeignKey, Uuid, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from src.db.base import Base
 
@@ -44,3 +44,14 @@ class Grant(Base):
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AiSuggestion(Base):
+    """One 'who should see this?' answer. Advisory only: nothing here grants access. Each item is decided once by the
+    owner through the decisions endpoint (status: pending -> accepted | modified | rejected)."""
+    __tablename__ = "ai_suggestions"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id"), index=True, nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    items: Mapped[list] = mapped_column(JSON, default=list, nullable=False)   # [{user_id, reason, status, grant_id?, decided_at?}]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

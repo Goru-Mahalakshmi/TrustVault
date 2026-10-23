@@ -25,6 +25,8 @@ PAYLOADS = {
     ("POST", "/api/documents/{doc_id}/transfer-reject"): {},
     ("POST", "/api/documents/{doc_id}/transfer-cancel"): {},
     ("POST", "/api/documents/{doc_id}/grantee-suggestions"): {},
+    ("POST", "/api/documents/{doc_id}/grantee-suggestions/{suggestion_id}/decisions"):
+        {"json": {"user_id": "00000000-0000-4000-8000-000000000001", "action": "reject"}},
 }
 DOC_ROUTES = sorted((m, r.path) for r in all_api_routes(app) if "{doc_id}" in r.path for m in r.methods - {"HEAD"})
 
@@ -34,7 +36,7 @@ def test_payload_table_covers_every_document_route():
 
 def _call(a, method, template, doc_id):
     url = (template.replace("{doc_id}", str(doc_id)).replace("{grant_id}", str(uuid.uuid4()))
-           .replace("{version_number}", "1"))
+           .replace("{version_number}", "1").replace("{suggestion_id}", str(uuid.uuid4())))
     return a.req(method, url, **PAYLOADS[(method, template)])
 
 async def _same_as_missing(a, method, template, doc, who):

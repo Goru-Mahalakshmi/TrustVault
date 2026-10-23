@@ -21,3 +21,13 @@ class GrantRead(BaseModel):
     granted_at: datetime
     expires_at: Optional[datetime]
     revoked_at: Optional[datetime]
+
+
+class DecisionIn(BaseModel):
+    """The owner's decision on ONE suggested person. The server, not the client, works out whether it counts as
+    'accepted' (read, no expiry, exactly as suggested) or 'modified' (anything else)."""
+    model_config = ConfigDict(extra="forbid")
+    user_id: uuid.UUID
+    action: Literal["grant", "reject"]
+    level: Literal["read", "edit"] = "read"
+    expires_at: Optional[datetime] = None

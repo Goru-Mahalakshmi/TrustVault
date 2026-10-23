@@ -30,7 +30,7 @@ def actor(client, create_user, auth_session):
     async def _make(username, role="owner"):
         u, _ = await create_user(username=username, role=role)
         s, c = await auth_session(u)
-        a = Actor(client, u, s, c); a.email = u.email
+        a = Actor(client, u, s, c); a.email = u.email; a.uid = u.id        # plain copy: ORM objects expire on rollback
         return a
     return _make
 

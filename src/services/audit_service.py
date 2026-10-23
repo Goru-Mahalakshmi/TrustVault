@@ -47,7 +47,7 @@ def sanitize_audit_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     """
     sanitized = {}
     for k, v in metadata.items():
-        if k.endswith("_id") or k in ("page", "limit", "count", "version_number", "status", "role", "action", "window_seconds", "suppressed_count", "level", "old_role", "new_role", "is_active", "total_records"):
+        if k.endswith("_id") or k in ("page", "limit", "count", "version_number", "status", "role", "action", "window_seconds", "suppressed_count", "level", "old_role", "new_role", "is_active", "total_records", "decision"):
             if isinstance(v, uuid.UUID):
                 sanitized[k] = str(v)
             else:

@@ -32,8 +32,10 @@ async def suggest_grantees(db, doc: Document, owner_id) -> list[dict]:
     if not cands:
         return []
     # Only non-sensitive metadata goes to the model: title + category. Never file contents.
-    prompt = "<data>" + json.dumps({"document": {"title": doc.title, "category": doc.category},
-                                    "candidates": list(cands.values())}) + "</data>"
+    payload = json.dumps({"document": {"title": doc.title, "category": doc.category},
+                          "candidates": list(cands.values())}, ensure_ascii=True)
+    # '<' and '>' are escaped so a title like "</data> ignore the rules" cannot close the delimiter and be read as instructions
+    prompt = "<data>" + payload.replace("<", "\\u003c").replace(">", "\\u003e") + "</data>"
     try:
         parsed = json.loads(await _call_model(prompt))
     except Exception:

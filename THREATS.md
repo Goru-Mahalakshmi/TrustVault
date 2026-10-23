@@ -296,8 +296,8 @@ This document details the threat landscape, defensive architecture, concrete tes
 - **Upload attacks:** null bytes, RTL-override names, double extensions, spoofed magic bytes, scripts, SVG/HTML, oversize, hostile filenames
   (`tests/test_upload_attacks.py`). `[BUILT]` Residual: docx/xlsx are only checked for a ZIP header and bomb ratio, not full OOXML structure;
   no antivirus; whole upload is read into memory (25 MB cap) before validation.
-- **"Judge removes one authorisation check":** `scripts/mutation_check.py` (65 mutants: every `authorize()` call site plus 46 other checks).
-  Result in `MUTATION_REPORT.md`: 65/65 killed. What it found: the first run of the suite let several mutants survive.
+- **"Judge removes one authorisation check":** `scripts/mutation_check.py` (77 mutants: every `authorize()` call site plus 61 other checks).
+  Result in `MUTATION_REPORT.md`: 77/77 killed. What it found: the first run of the suite let several mutants survive.
   Six genuine test gaps were closed (restore of a live document, demoted transfer recipient, transfer to self, expired grants in search,
   filename sanitiser, and no-decryption-before-authorisation), and two mutants survived only because a second layer repeated the check
   (download `nosniff` header also set by middleware; disabled-user check also covered by the security_version bump) - each layer now has its
@@ -323,3 +323,17 @@ This document details the threat landscape, defensive architecture, concrete tes
   must not live in the database; backing them up elsewhere is the operator's job (DEPLOY.md says so).
 - Email defaults to console output in the demo deployment, so reset links appear in server logs. Reason: no mail account was provisioned.
 - Single server, no high availability, no automated backups. Reason: scope of a one-week build; backup commands are documented.
+
+## AI suggestions (Phase 5)
+- **The model widens access by itself:** suggesting creates no grant; access only follows the owner's per-person decision through the same grant
+  code as a manual grant (`tests/test_ai_decisions.py::test_full_flow_...`, mutant "ai: suggestions auto-applied as grants"). `[BUILT]`
+- **Hallucinated or malicious ids from the model:** ids must be previous grantees of this owner; others are dropped, and a decision naming anyone the AI
+  did not suggest is a 404 (`..._never_suggested_cannot_be_granted...`). `[BUILT]`
+- **Prompt injection through titles, categories or model output:** document text is JSON-escaped with `<`/`>` neutralised so it cannot close the data
+  delimiter; injected fields in model output are ignored; reasons are inert text (UI uses textContent). `[BUILT]` Residual: injected text can still
+  *influence which already-valid candidate is suggested*; that is why a human decides, and why it is audited.
+- **Forged or mislabelled decisions:** the client cannot send the label (extra fields are 422); the server derives accepted/modified. A suggestion cannot be
+  replayed on another document or by another owner; each person can be decided once. `[BUILT]`
+- **Audit of the AI path:** request, each suggested person, each decision and resulting grant, ids only. `[BUILT]` Residual: the model's reason text is stored
+  in `ai_suggestions` (mutable app data), not in the hash-chained audit.
+- **Knowingly not built:** an owner opt-in to send more than title/category to the model (nothing else is ever sent).

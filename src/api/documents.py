@@ -5,6 +5,7 @@ from urllib.parse import quote
 from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import select, or_, func, update
+from sqlalchemy.orm import undefer
 from sqlalchemy.ext.asyncio import AsyncSession
 import src.db.session as db_module
 from src.api.deps import AuthContext, current_auth, audit, client_meta
@@ -13,7 +14,8 @@ from src.core.config import settings
 from src.db.session import get_db
 from src.models.document import AiSuggestion, Document, DocumentVersion, Grant
 from src.models.user import User
-from src.schemas.document import DecisionIn, GrantCreate, GrantRead, TransferRequest
+from src.models.audit import AuditLog
+from src.schemas.document import DecisionIn, DocumentUpdate, GrantCreate, GrantRead, TransferRequest
 from src.services import ai_service
 from src.services.audit_service import log_refusal
 from src.services.authz import Action, authorize, still_authorized
@@ -35,11 +37,15 @@ async def _read_upload(file: UploadFile):
 async def _add_version(db, doc, user_id, name, data, number) -> DocumentVersion:
     ver_id = uuid.uuid4()
     enc = crypto.encrypt_file(data, doc.id, ver_id)
-    path = crypto.storage_path(doc.id, ver_id)
-    crypto.write_blob(path, enc.pop("ciphertext"))
+    ciphertext = enc.pop("ciphertext")
+    if settings.STORAGE_BACKEND == "db":
+        path, blob = f"db:{doc.id}_{ver_id}", ciphertext          # encrypted blob lives in PostgreSQL (no disk needed)
+    else:
+        path, blob = crypto.storage_path(doc.id, ver_id), None
+        crypto.write_blob(path, ciphertext)
     ver = DocumentVersion(id=ver_id, document_id=doc.id, version_number=number, original_filename=name,
                           mime_type=uploads.MIME[os.path.splitext(name.lower())[1]], file_size_bytes=len(data),
-                          storage_path=path, uploaded_by=user_id, **enc)
+                          storage_path=path, blob=blob, uploaded_by=user_id, **enc)
     db.add(ver)
     return ver
 
@@ -48,11 +54,12 @@ async def _commit_or_cleanup(db, *paths):
         await db.commit()
     except Exception:
         for p in paths:
-            if os.path.exists(p): os.remove(p)
+            if not p.startswith("db:") and os.path.exists(p): os.remove(p)
         raise
 
 async def _latest(db, doc_id) -> DocumentVersion:
-    return (await db.execute(select(DocumentVersion).where(DocumentVersion.document_id == doc_id)
+    return (await db.execute(select(DocumentVersion).options(undefer(DocumentVersion.blob))
+                             .where(DocumentVersion.document_id == doc_id)
                              .order_by(DocumentVersion.version_number.desc()).limit(1))).scalar_one()
 
 async def _user_by_email(db, email: str):
@@ -68,6 +75,7 @@ async def upload_document(request: Request, title: str = Form(..., min_length=1,
                           actor_username=ctx.username, actor_role=ctx.role, reason="ROLE_REQUIRED",
                           metadata={"action": "upload"}, **client_meta(request))
         raise HTTPException(403, "Requires 'owner' role")
+    await enforce_rate_limit(db, request, "upload", settings.RATE_LIMIT_UPLOADS_PER_MIN, identifier=str(ctx.user_id))
     data, name = await _read_upload(file)
     doc = Document(owner_id=ctx.user_id, title=title, category=category)
     db.add(doc); await db.flush()
@@ -131,6 +139,13 @@ async def pending_transfers(ctx: AuthContext = Depends(current_auth), db: AsyncS
     # Deliberately minimal: no title, versions or file access before acceptance.
     return [{"document_id": str(i), "category": c, "from_username": u} for i, c, u in rows]
 
+@router.get("/trash")
+async def trash(ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depends(get_db)):
+    """Your OWN soft-deleted documents (the only way to find an id to restore). Never anyone else's."""
+    rows = (await db.execute(select(Document).where(Document.owner_id == ctx.user_id, Document.is_deleted.is_(True))
+                             .order_by(Document.deleted_at.desc()))).scalars().all()
+    return [{"id": str(d.id), "title": d.title, "category": d.category, "deleted_at": d.deleted_at} for d in rows]
+
 @router.get("/{doc_id}")
 async def get_document(doc_id: uuid.UUID, request: Request, ctx: AuthContext = Depends(current_auth),
                        db: AsyncSession = Depends(get_db)):
@@ -149,8 +164,11 @@ async def _release(db, ctx, request, doc, ver) -> Response:
     fresh connection, audit 'released', respond. Used by every download route."""
     did, vid, fname, path = doc.id, ver.id, ver.original_filename, ver.storage_path
     async with _decrypt_sem:
-        with open(path, "rb") as f:
-            blob = f.read()
+        if path.startswith("db:"):
+            blob = ver.blob
+        else:
+            with open(path, "rb") as f:
+                blob = f.read()
         try:
             plain = crypto.decrypt_file(blob, ver, did)                  # GCM tag verified here
         except InvalidTag:
@@ -199,8 +217,8 @@ async def list_versions(doc_id: uuid.UUID, request: Request, ctx: AuthContext = 
 async def download_version(doc_id: uuid.UUID, version_number: int, request: Request,
                            ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depends(get_db)):
     doc = await authorize(db, ctx, request, doc_id, Action.DOWNLOAD)     # same gate as the latest version
-    ver = (await db.execute(select(DocumentVersion).where(DocumentVersion.document_id == doc.id,
-                                                          DocumentVersion.version_number == version_number))).scalar_one_or_none()
+    ver = (await db.execute(select(DocumentVersion).options(undefer(DocumentVersion.blob)).where(
+        DocumentVersion.document_id == doc.id, DocumentVersion.version_number == version_number))).scalar_one_or_none()
     if ver is None:
         raise HTTPException(404, "Version not found")
     return await _release(db, ctx, request, doc, ver)
@@ -210,6 +228,7 @@ async def download_version(doc_id: uuid.UUID, version_number: int, request: Requ
 async def upload_version(doc_id: uuid.UUID, request: Request, file: UploadFile = File(...),
                          ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depends(get_db)):
     doc = await authorize(db, ctx, request, doc_id, Action.EDIT)
+    await enforce_rate_limit(db, request, "upload", settings.RATE_LIMIT_UPLOADS_PER_MIN, identifier=str(ctx.user_id))
     data, name = await _read_upload(file)
     await db.execute(select(Document).where(Document.id == doc.id).with_for_update())   # serialise numbering
     last = (await db.execute(select(func.max(DocumentVersion.version_number))
@@ -220,6 +239,34 @@ async def upload_version(doc_id: uuid.UUID, request: Request, file: UploadFile =
                 version_id=str(ver.id), version_number=ver.version_number)
     await _commit_or_cleanup(db, ver.storage_path)
     return {"version_id": str(ver.id), "version_number": ver.version_number}
+
+@router.patch("/{doc_id}")
+async def update_document(doc_id: uuid.UUID, body: DocumentUpdate, request: Request,
+                          ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depends(get_db)):
+    doc = await authorize(db, ctx, request, doc_id, Action.UPDATE_METADATA)       # owner only: edit grantees cannot relabel
+    changed = 0
+    if body.title is not None and body.title != doc.title:
+        doc.title, changed = body.title, changed + 1
+    if body.category is not None and body.category != doc.category:
+        doc.category, changed = body.category, changed + 1
+    doc.updated_at = datetime.now(timezone.utc)
+    await audit(db, ctx, request, "DOCUMENT_METADATA_UPDATE", "document", doc.id, document_id=str(doc.id), count=changed)
+    await db.commit()
+    return {"id": str(doc.id), "title": doc.title, "category": doc.category}
+
+@router.get("/{doc_id}/audit")
+async def document_audit(doc_id: uuid.UUID, request: Request, page: int = Query(1, ge=1),
+                         limit: int = Query(50, ge=1, le=200), ctx: AuthContext = Depends(current_auth),
+                         db: AsyncSession = Depends(get_db)):
+    """Who touched THIS document and when, including refused attempts. Owner only; the view is itself audited."""
+    doc = await authorize(db, ctx, request, doc_id, Action.AUDIT_VIEW)
+    rows = (await db.execute(select(AuditLog).where(AuditLog.resource_type == "document", AuditLog.resource_id == str(doc.id))
+                             .order_by(AuditLog.sequence_number.desc()).offset((page - 1) * limit).limit(limit))).scalars().all()
+    out = [{"sequence_number": r.sequence_number, "timestamp": r.timestamp, "actor_username": r.actor_username,
+            "action": r.action, "status": r.status, "reason": r.reason, "metadata": r.metadata_json} for r in rows]
+    await audit(db, ctx, request, "DOCUMENT_AUDIT_VIEW", "document", doc.id, document_id=str(doc.id), page=page, count=len(out))
+    await db.commit()
+    return out
 
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: uuid.UUID, request: Request, ctx: AuthContext = Depends(current_auth),
@@ -355,7 +402,7 @@ async def transfer_cancel(doc_id: uuid.UUID, request: Request, ctx: AuthContext 
 async def grantee_suggestions(doc_id: uuid.UUID, request: Request, ctx: AuthContext = Depends(current_auth),
                               db: AsyncSession = Depends(get_db)):
     doc = await authorize(db, ctx, request, doc_id, Action.AI_SUGGEST)
-    if not settings.ANTHROPIC_API_KEY:
+    if not settings.ai_configured:
         raise HTTPException(503, "AI suggestions are not configured")
     suggestions = await ai_service.suggest_grantees(db, doc, ctx.user_id)
     rec = AiSuggestion(document_id=doc.id, owner_id=ctx.user_id,

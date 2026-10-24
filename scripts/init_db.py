@@ -4,13 +4,14 @@ The API itself connects as trustvault_app and can neither create tables nor touc
 import asyncio, os, pathlib, sys
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+from src.core.config import normalize_db_url
 from src.db.base import Base
 import src.models  # noqa: F401
 
 SQL = pathlib.Path(__file__).resolve().parent.parent / "db" / "hardening.sql"
 
 async def init(owner_url: str, drop_first: bool = False):
-    eng = create_async_engine(owner_url)
+    eng = create_async_engine(normalize_db_url(owner_url))
     async with eng.begin() as c:
         if drop_first:
             await c.run_sync(Base.metadata.drop_all)

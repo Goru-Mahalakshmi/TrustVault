@@ -11,7 +11,7 @@ from src.models.document import Grant
 from src.services import ai_service
 from tests.test_documents import actor, storage, shared, audit_rows, PDF  # noqa: F401
 
-async def world(actor, monkeypatch, title="Q4 plan", category="finance", reply=None):
+async def world(actor, monkeypatch, title="Q4 plan", category="finance", reply=None, fake_model=True):
     """alice has previously shared a document with bob, carol and dave: those are the only possible candidates."""
     a, bob, carol, dave = await actor("alice"), await actor("bob", "viewer"), await actor("carol"), await actor("dave")
     past = (await a.upload(title="past")).json()["id"]
@@ -30,7 +30,8 @@ async def world(actor, monkeypatch, title="Q4 plan", category="finance", reply=N
             return reply(bob, carol, dave)
         return json.dumps([{"user_id": str(u.uid), "reason": "past collaborator"} for u in (bob, carol, dave)]
                           + [{"user_id": str(uuid.uuid4()), "reason": "hallucinated"}])
-    monkeypatch.setattr(ai_service, "_call_model", fake)
+    if fake_model:
+        monkeypatch.setattr(ai_service, "_call_model", fake)           # tests of the real provider call pass fake_model=False
     return a, bob, carol, dave, doc, prompts
 
 def decide(a, doc, sid, user, **body):
@@ -139,3 +140,50 @@ async def test_only_the_owner_can_ask_and_no_key_means_503(actor, monkeypatch):
     assert (await bob.req("POST", f"/api/documents/{doc}/grantee-suggestions")).status_code == 404
     monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
     assert (await a.req("POST", f"/api/documents/{doc}/grantee-suggestions")).status_code == 503
+
+
+# ---------------- any OpenAI-compatible provider (several have free tiers) ----------------
+def _use_provider(monkeypatch, handler):
+    import httpx
+    from src.services import ai_service as svc
+    real = httpx.AsyncClient
+    monkeypatch.setattr(svc.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    for k, v in (("AI_PROVIDER", "openai_compatible"), ("AI_API_KEY", "free-key"), ("AI_BASE_URL", "https://llm.example.test/v1"),
+                 ("AI_MODEL", "some-free-model"), ("ANTHROPIC_API_KEY", "")):
+        monkeypatch.setattr(settings, k, v)
+
+async def test_openai_compatible_provider_request_shape_and_fenced_json_reply(actor, db_session, monkeypatch):
+    import httpx
+    seen = {}
+    a, bob, carol, dave, doc, _ = await world(actor, monkeypatch, fake_model=False)   # the REAL _call_model runs; only the network is faked
+    async def handler(request: httpx.Request):
+        seen["url"], seen["auth"], seen["body"] = str(request.url), request.headers.get("authorization"), json.loads(request.content)
+        content = "Here you go:\n```json\n" + json.dumps([{"user_id": str(bob.uid), "reason": "worked together"},
+                                                          {"user_id": str(uuid.uuid4()), "reason": "made up"}]) + "\n```"
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}]})
+    _use_provider(monkeypatch, handler)
+    r = await a.req("POST", f"/api/documents/{doc}/grantee-suggestions")
+    assert r.status_code == 200
+    assert [s["user_id"] for s in r.json()["suggestions"]] == [str(bob.uid)]        # fence tolerated, made-up id dropped
+    assert seen["url"] == "https://llm.example.test/v1/chat/completions" and seen["auth"] == "Bearer free-key"
+    assert seen["body"]["model"] == "some-free-model" and seen["body"]["messages"][0]["role"] == "system"
+    assert "<data>" in seen["body"]["messages"][1]["content"] and "PLAINTEXT" not in seen["body"]["messages"][1]["content"]
+    assert await grants_on(db_session, doc) == []
+
+async def test_provider_must_be_fully_configured_otherwise_503(actor, monkeypatch):
+    a, bob, carol, dave, doc, _ = await world(actor, monkeypatch)
+    for k, v in (("AI_PROVIDER", "openai_compatible"), ("AI_API_KEY", "k"), ("AI_BASE_URL", ""), ("AI_MODEL", "m"), ("ANTHROPIC_API_KEY", "set-but-unused")):
+        monkeypatch.setattr(settings, k, v)
+    assert (await a.req("POST", f"/api/documents/{doc}/grantee-suggestions")).status_code == 503   # missing base url
+    monkeypatch.setattr(settings, "AI_PROVIDER", "anthropic"); monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    assert (await a.req("POST", f"/api/documents/{doc}/grantee-suggestions")).status_code == 503   # AI_API_KEY alone is not enough for anthropic
+
+def test_ai_settings_are_validated():
+    import pytest
+    from pydantic import ValidationError
+    from src.core.config import Settings
+    for bad in ({"AI_PROVIDER": "something"}, {"AI_BASE_URL": "http://insecure.example/v1"}):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **bad)
+    s = Settings(_env_file=None, AI_PROVIDER="openai_compatible", AI_API_KEY="k", AI_BASE_URL="https://x.example/v1", AI_MODEL="m")
+    assert s.ai_configured and s.ai_model == "m" and not Settings(_env_file=None).ai_configured

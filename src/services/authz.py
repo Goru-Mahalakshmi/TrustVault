@@ -14,6 +14,7 @@ class Action(str, enum.Enum):
     READ = "read"; DOWNLOAD = "download"; EDIT = "edit"
     DELETE = "delete"; RESTORE = "restore"; ACCESS_LIST = "access_list"
     GRANT = "grant"; REVOKE = "revoke"; TRANSFER = "transfer"; TRANSFER_CANCEL = "transfer_cancel"
+    UPDATE_METADATA = "update_metadata"; AUDIT_VIEW = "audit_view"
     TRANSFER_ACCEPT = "transfer_accept"; TRANSFER_REJECT = "transfer_reject"; AI_SUGGEST = "ai_suggest"
 
 LEVEL_ACTIONS = {"read": {Action.READ, Action.DOWNLOAD}, "edit": {Action.READ, Action.DOWNLOAD, Action.EDIT}}

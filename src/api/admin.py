@@ -1,8 +1,9 @@
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import AuthContext, require_role, audit
 from src.db.session import get_db
@@ -66,16 +67,40 @@ async def trigger_reset(user_id: uuid.UUID, request: Request, ctx: AuthContext =
         await send_reset_email(u.email, token)          # token goes to the user's inbox only, never to the admin
     return GenericMessageResponse(message="Password reset triggered; instructions sent to the user's email")
 
+KINDS = {"document": ("DOCUMENT_%", "ACCESS_REFUSED", "SEARCH_QUERY", "AI_GRANTEE_SUGGESTION"),
+         "permission": ("PERMISSION_%", "OWNERSHIP_TRANSFER_%", "AI_SUGGESTION_%", "AI_SUGGESTED_GRANTEE"),
+         "admin": ("ADMIN_%", "AUDIT_%"),
+         "auth": ("AUTH_%", "LOGIN%", "LOGOUT%", "USER_%", "PASSWORD_%", "EMAIL_%")}
+
 @router.get("/audit")
 async def view_audit(request: Request, page: int = Query(1, ge=1), limit: int = Query(50, ge=1, le=200),
+                     kind: Optional[Literal["document", "permission", "admin", "auth"]] = None,
+                     action: Optional[str] = Query(None, max_length=64), actor: Optional[str] = Query(None, max_length=64),
+                     resource_id: Optional[str] = Query(None, max_length=64),
+                     status: Optional[Literal["SUCCESS", "DENIED", "ERROR"]] = None, since: Optional[datetime] = None,
                      ctx: AuthContext = Depends(admin_only), db: AsyncSession = Depends(get_db)):
-    rows = (await db.execute(select(AuditLog).order_by(AuditLog.sequence_number.desc())
+    """Document activity and permission changes (ids only: admins never see titles, filenames or contents)."""
+    conds = []
+    if kind:
+        conds.append(or_(*[AuditLog.action.like(p) for p in KINDS[kind]]))
+    if action:
+        conds.append(AuditLog.action == action)
+    if actor:
+        conds.append(AuditLog.actor_username == actor)
+    if resource_id:
+        conds.append(AuditLog.resource_id == resource_id)
+    if status:
+        conds.append(AuditLog.status == status)
+    if since:
+        conds.append(AuditLog.timestamp >= (since if since.tzinfo else since.replace(tzinfo=timezone.utc)))
+    rows = (await db.execute(select(AuditLog).where(*conds).order_by(AuditLog.sequence_number.desc())
                              .offset((page - 1) * limit).limit(limit))).scalars().all()
-    await audit(db, ctx, request, "AUDIT_LOG_VIEW", "audit", page=page, limit=limit)   # viewing is itself audited
+    await audit(db, ctx, request, "AUDIT_LOG_VIEW", "audit", page=page, limit=limit, count=len(rows))   # viewing is itself audited
     await db.commit()
     return [{"sequence_number": r.sequence_number, "timestamp": r.timestamp, "actor_id": r.actor_id,
-             "action": r.action, "status": r.status, "reason": r.reason, "resource_type": r.resource_type,
-             "resource_id": r.resource_id, "metadata": r.metadata_json} for r in rows]
+             "actor_username": r.actor_username, "actor_role": r.actor_role, "action": r.action, "status": r.status,
+             "reason": r.reason, "resource_type": r.resource_type, "resource_id": r.resource_id,
+             "ip_address": r.ip_address, "metadata": r.metadata_json} for r in rows]
 
 @router.post("/audit/verify")
 async def verify_chain(request: Request, ctx: AuthContext = Depends(admin_only), db: AsyncSession = Depends(get_db)):

@@ -12,6 +12,8 @@ from tests.test_documents import actor, storage, shared, PDF  # noqa: F401
 PAYLOADS = {
     ("GET", "/api/documents/{doc_id}"): {},
     ("GET", "/api/documents/{doc_id}/download"): {},
+    ("PATCH", "/api/documents/{doc_id}"): {"json": {"title": "renamed"}},
+    ("GET", "/api/documents/{doc_id}/audit"): {},
     ("GET", "/api/documents/{doc_id}/versions"): {},
     ("GET", "/api/documents/{doc_id}/versions/{version_number}/download"): {},
     ("POST", "/api/documents/{doc_id}/versions"): {"files": {"file": ("n.pdf", PDF + b"x")}},

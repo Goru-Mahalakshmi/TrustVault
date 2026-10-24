@@ -2,10 +2,7 @@ from fastapi import FastAPI
 from src.main import app
 from tests.routes_util import all_api_routes, unprotected_routes
 
-# The ONLY routes that may be reachable without a session. Adding one here is a deliberate, reviewed act.
-PUBLIC = {("GET", "/"), ("GET", "/healthz"), ("POST", "/api/auth/register"), ("POST", "/api/auth/login"),
-          ("POST", "/api/auth/forgot-password"), ("POST", "/api/auth/reset-password"),
-          ("POST", "/api/auth/email-change-confirm")}
+from scripts.route_inventory import PUBLIC  # single source of truth, shared with the API reference generator
 
 def _openapi_ops():
     return {(m.upper(), p) for p, ms in app.openapi()["paths"].items() for m in ms}

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import JSON, String, Boolean, Integer, BigInteger, DateTime, ForeignKey, Uuid, UniqueConstraint, func
+from sqlalchemy import JSON, LargeBinary, String, Boolean, Integer, BigInteger, DateTime, ForeignKey, Uuid, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from src.db.base import Base
 
@@ -26,7 +26,8 @@ class DocumentVersion(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)   # sanitised, display only
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    storage_path: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)   # "db:<doc>_<ver>" when the blob is in the database
+    blob: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True, deferred=True)   # ciphertext (STORAGE_BACKEND=db only)
     encrypted_dek: Mapped[str] = mapped_column(String(255), nullable=False)       # nonce stored separately, tag inside
     dek_nonce: Mapped[str] = mapped_column(String(32), nullable=False)
     file_nonce: Mapped[str] = mapped_column(String(32), nullable=False)

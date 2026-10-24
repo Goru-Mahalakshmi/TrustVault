@@ -1,17 +1,19 @@
+# Python
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
-storage/
-*.db
+
+# Secrets
 .env
-.mutation_backup/
-.mutation_results.jsonl
-.env.prod
 .env.*
 !.env.example
 !.env.prod.example
 
-*.pem
-*.key
-secrets/
+# Local data
+storage/
+*.db
+
+# Test and mutation artifacts
+.mutation_backup/
+.mutation_results.jsonl

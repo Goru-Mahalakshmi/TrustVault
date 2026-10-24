@@ -66,7 +66,7 @@ def render() -> str:
             who, notes, events, summary = describe(*rows[k])
             out.append(f"| {k[0]} | `{k[1]}` | {who} | {summary}. {notes} | {events} |".replace(". . ", ". "))
         out.append("")
-    return "\n".join(out) + "\n"
+    return "\n".join(out).rstrip() + "\n"
 
 if __name__ == "__main__":
     pathlib.Path("docs/API_REFERENCE.md").write_text(render(), encoding="utf-8")

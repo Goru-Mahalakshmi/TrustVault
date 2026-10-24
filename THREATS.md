@@ -34,7 +34,7 @@ This document details the threat landscape, defensive architecture, concrete tes
   - Document-mutating endpoints enforce `authorize(actor, document, Action.DOCUMENT_DELETE)` which strictly requires `actor.id == document.owner_id`.
   - Grants of level `edit` permit only `Action.DOCUMENT_EDIT` (uploading new versions) and reject delete, grant, revoke, transfer, and restore.
 - **Verification Test:** `tests/test_documents.py::test_viewer_and_admin_cannot_upload` and `tests/test_routes.py::test_every_route_requires_auth_or_is_explicitly_public`
-- **Residual Risk:** Developer adding a new endpoint and omitting the dependency. Mitigated by `tests/test_routes.py::test_endpoint_inventory_has_explicit_auth` which inspects FastAPI's route table at test time and fails the build if any route lacks auth dependencies or explicit `@public` decorator.
+- **Residual Risk:** Developer adding a new endpoint and omitting the dependency. Mitigated by `tests/test_routes.py::test_every_route_requires_auth_or_is_explicitly_public` which inspects FastAPI's route table at test time and fails the build if any route lacks auth dependencies or explicit `@public` decorator.
 
 ---
 
@@ -215,11 +215,11 @@ This document details the threat landscape, defensive architecture, concrete tes
   - **ID-Only Audit Metadata:** Audit metadata stores IDs only (`document_id`, `version_id`, `user_id`, `grant_id`). Filenames, titles, and search queries are excluded, preventing log injection and metadata leakage.
   - **Deadlock-Free Denial Logging:** If an action is denied, the main request transaction is rolled back first to release all locks, and the refusal log is committed in an **independent, isolated database session**. The refusal transaction can never wait on a lock held by the same request.
   - **External Anchoring to Separate Git Repository / Email:** Periodic cron job writes latest hash to a separate external git repository or authenticated email.
-- **Verification Test:** `tests/test_documents.py::test_admin_audit_endpoints_and_tamper_detection`
+- **Verification Test:** `tests/test_documents.py::test_deliberate_trigger_bypass_is_still_detected_by_the_chain`
 - **Residual Risk:** See Section 2 (Honest PostgreSQL Superuser Threat Model & Key Exposure).
 
 ---
-- **Implementation note:** BUILT: HMAC chain, tamper detection, isolated refusal logging (tests/test_documents.py::test_refusal_never_waits_on_a_lock_held_by_the_same_request), DB-backed refusal rate limit with aggregate event. NOT YET RUN: `docs/postgres_audit_hardening.sql` (role split + immutable trigger, needs PostgreSQL) and `scripts/anchor_audit.py` scheduling.
+- **Implementation note:** BUILT: HMAC chain, tamper detection, isolated refusal logging (tests/test_documents.py::test_refusal_never_waits_on_a_lock_held_by_the_same_request), DB-backed refusal rate limit with aggregate event. NOT YET RUN: `db/hardening.sql` (role split + immutable trigger, needs PostgreSQL) and `scripts/anchor_audit.py` scheduling.
 
 ### 1.14 User Lookup for Granting & Enumeration Trade-Off
 - **Status:** `[BUILT]`
@@ -296,8 +296,8 @@ This document details the threat landscape, defensive architecture, concrete tes
 - **Upload attacks:** null bytes, RTL-override names, double extensions, spoofed magic bytes, scripts, SVG/HTML, oversize, hostile filenames
   (`tests/test_upload_attacks.py`). `[BUILT]` Residual: docx/xlsx are only checked for a ZIP header and bomb ratio, not full OOXML structure;
   no antivirus; whole upload is read into memory (25 MB cap) before validation.
-- **"Judge removes one authorisation check":** `scripts/mutation_check.py` (77 mutants: every `authorize()` call site plus 61 other checks).
-  Result in `MUTATION_REPORT.md`: 77/77 killed. What it found: the first run of the suite let several mutants survive.
+- **"Judge removes one authorisation check":** `scripts/mutation_check.py` (100 mutants: every `authorize()` call site plus 61 other checks).
+  Result in `MUTATION_REPORT.md`: 100/100 killed. What it found: the first run of the suite let several mutants survive.
   Six genuine test gaps were closed (restore of a live document, demoted transfer recipient, transfer to self, expired grants in search,
   filename sanitiser, and no-decryption-before-authorisation), and two mutants survived only because a second layer repeated the check
   (download `nosniff` header also set by middleware; disabled-user check also covered by the security_version bump) - each layer now has its
@@ -326,7 +326,7 @@ This document details the threat landscape, defensive architecture, concrete tes
 
 ## AI suggestions (Phase 5)
 - **The model widens access by itself:** suggesting creates no grant; access only follows the owner's per-person decision through the same grant
-  code as a manual grant (`tests/test_ai_decisions.py::test_full_flow_...`, mutant "ai: suggestions auto-applied as grants"). `[BUILT]`
+  code as a manual grant (`tests/test_ai_decisions.py::test_full_flow_nothing_granted_until_the_owner_decides_and_everything_is_audited`, mutant "ai: suggestions auto-applied as grants"). `[BUILT]`
 - **Hallucinated or malicious ids from the model:** ids must be previous grantees of this owner; others are dropped, and a decision naming anyone the AI
   did not suggest is a 404 (`..._never_suggested_cannot_be_granted...`). `[BUILT]`
 - **Prompt injection through titles, categories or model output:** document text is JSON-escaped with `<`/`>` neutralised so it cannot close the data
@@ -337,3 +337,33 @@ This document details the threat landscape, defensive architecture, concrete tes
 - **Audit of the AI path:** request, each suggested person, each decision and resulting grant, ids only. `[BUILT]` Residual: the model's reason text is stored
   in `ai_suggestions` (mutable app data), not in the hash-chained audit.
 - **Knowingly not built:** an owner opt-in to send more than title/category to the model (nothing else is ever sent).
+
+## Requirement coverage added in the final audit
+- **Owner can organise and manage:** edit title/category (owner only; an edit grantee gets 403; labels never change access) and a trash list to find and restore
+  deleted documents (`tests/test_requirements.py::test_only_the_owner_may_relabel_even_with_an_edit_grant`,
+  `tests/test_requirements.py::test_trash_lists_only_my_deleted_documents_and_restore_empties_it`). `[BUILT]`
+- **Owner can prove who touched a document, including refused attempts:** `GET /api/documents/{id}/audit` (owner only, itself audited)
+  (`tests/test_requirements.py::test_owner_sees_every_access_including_refused_attempts_and_the_view_is_audited`). `[BUILT]`
+- **Admin view of document activity and permission changes:** filtered by kind, actor, resource, result and date, ids only
+  (`tests/test_requirements.py::test_admin_activity_view_filters_document_activity_and_permission_changes`). `[BUILT]`
+- **Flooding with uploads:** 30 uploads/versions per minute per user (`tests/test_requirements.py::test_uploads_are_rate_limited_per_user`). `[BUILT]`
+  Residual: no per-user storage quota; a patient user can still fill the disk/database slowly.
+- **HEAD/OPTIONS/CORS side doors:** HEAD on document routes is 405; no CORS headers are ever sent
+  (`tests/test_requirements.py::test_head_and_options_do_not_open_side_doors`). `[BUILT]`
+- **Documentation drifting from the code:** `docs/API_REFERENCE.md` and `db/schema.sql` are generated and a test fails if they are stale; every test and
+  file cited in THREATS.md/README.md/DEPLOY.md is checked to exist (`tests/test_docs_current.py::test_every_test_and_file_cited_in_the_docs_exists`). `[BUILT]`
+
+### Knowingly accepted (free-host deployment)
+- On Render's free tier there is one database user, so the audit table is protected by the immutability trigger only (verified: even the owner-level
+  connection is refused UPDATE/DELETE/TRUNCATE) and not by a separate low-privilege role. Anyone who could run DDL as that user (for example by
+  compromising the app with arbitrary SQL execution) could drop the trigger; the HMAC chain would still expose edited history, and the key is not in the database.
+- Files are stored as AES-GCM ciphertext inside PostgreSQL there (`STORAGE_BACKEND=db`) because the free tier has no persistent disk. A database dump
+  therefore contains ciphertext and wrapped keys, but not the master key (environment only).
+- The app falls asleep when idle on the free tier; the first request is slow.
+
+## AI provider choice (final)
+- The provider is swappable (`AI_PROVIDER`): Anthropic or any OpenAI-compatible API. Everything that makes the feature safe is provider-independent and tested without a
+  real provider: ids must be previous grantees of this owner, reasons are inert text, replies wrapped in code fences or prose are parsed leniently but still validated,
+  and nothing is granted without the owner's per-person decision. `[BUILT]` (`tests/test_ai_decisions.py::test_openai_compatible_provider_request_shape_and_fenced_json_reply`)
+- **Knowingly accepted:** a third party sees the document title, category and the names/past categories of the owner's earlier grantees (never file contents); a free tier may
+  retain them. Residual: a different model can be socially engineered into suggesting a different *valid* candidate; the human decision and the audit are the control.

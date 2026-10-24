@@ -150,3 +150,14 @@ async def auth_session(db_session: AsyncSession):
         return raw_session_token, raw_csrf_token
 
     return _auth
+
+
+@pytest.fixture(autouse=True)
+def _clean_ai_settings(monkeypatch):
+    """Every test starts with AI switched OFF, whatever is in the developer's shell or .env
+    (for example a real Groq key). Tests that need AI turn it on themselves, after this runs."""
+    for name in ("AI_PROVIDER", "ANTHROPIC_API_KEY", "AI_API_KEY", "AI_BASE_URL", "AI_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(settings, "AI_PROVIDER", "anthropic")
+    for name in ("ANTHROPIC_API_KEY", "AI_API_KEY", "AI_BASE_URL", "AI_MODEL"):
+        monkeypatch.setattr(settings, name, "")

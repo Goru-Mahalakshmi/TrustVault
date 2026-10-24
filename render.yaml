@@ -1,0 +1,35 @@
+# Render Blueprint: free web service (Docker) + free PostgreSQL. See DEPLOY.md, "Option A: Render".
+databases:
+  - name: trustvault-db
+    plan: free
+    databaseName: trustvault
+    user: trustvault
+
+services:
+  - type: web
+    name: trustvault
+    runtime: docker
+    plan: free
+    dockerCommand: sh scripts/start.sh
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: trustvault-db
+          property: connectionString
+      - key: STORAGE_BACKEND          # Render's free tier has no persistent disk: keep encrypted files in PostgreSQL
+        value: db
+      - key: SEED_ON_START            # demo accounts + sample documents (idempotent); set to 0 after judging
+        value: "1"
+      - key: MASTER_KEY_B64           # Render generates a random 256-bit value. If the app refuses to start, set your own (DEPLOY.md)
+        generateValue: true
+      - key: AUDIT_HMAC_KEY
+        generateValue: true
+      - key: TRUSTED_PROXIES          # Render's proxy sits on private addresses; the real client is the rightmost untrusted hop
+        value: '["10.0.0.0/8","172.16.0.0/12","100.64.0.0/10","192.168.0.0/16"]'
+      - key: APP_BASE_URL             # EDIT: your service URL, used in emailed links
+        value: https://trustvault.onrender.com
+      - key: EMAIL_BACKEND
+        value: console

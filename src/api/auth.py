@@ -46,7 +46,10 @@ async def me(ctx: AuthContext = Depends(current_auth), db: AsyncSession = Depend
 
 @router.post("/forgot-password", response_model=GenericMessageResponse)
 async def forgot_password(body: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    await enforce_rate_limit(db, request, "forgot", settings.RATE_LIMIT_LOGIN_PER_MIN)
+    # API.md: 3 requests/hour per IP AND per email. The email limit applies to any address equally, so it reveals nothing.
+    await enforce_rate_limit(db, request, "forgot_ip", settings.RATE_LIMIT_FORGOT_PER_HOUR, window_seconds=3600)
+    await enforce_rate_limit(db, request, "forgot_email", settings.RATE_LIMIT_FORGOT_PER_HOUR, window_seconds=3600,
+                             identifier=hash_token(body.email.lower())[:32])
     msg, token = await svc.request_password_reset(db, body.email, **client_meta(request))
     if token:
         await send_reset_email(body.email, token)       # the token only ever travels by email

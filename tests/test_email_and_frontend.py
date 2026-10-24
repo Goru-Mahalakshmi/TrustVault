@@ -61,3 +61,35 @@ async def test_frontend_served_with_strict_csp_and_no_inline_script(client):
     assert r.status_code == 200 and "script-src 'self'" in r.headers["content-security-policy"]
     assert "<script>" not in r.text and "onclick=" not in r.text
     assert (await client.get("/static/app.js")).status_code == 200
+
+
+async def test_forgot_password_is_limited_to_three_per_hour_per_ip_and_per_email(client, create_user, mail):
+    u, _ = await create_user(username="rate")
+    codes = [(await client.post("/api/auth/forgot-password", json={"email": f"who{i}@example.com"})).status_code for i in range(4)]
+    assert codes == [200, 200, 200, 429]                                           # per IP, whatever the address
+    other_ips = lambda i: {"X-Forwarded-For": f"198.51.100.{i}"}
+    codes = [(await client.post("/api/auth/forgot-password", json={"email": u.email}, headers=other_ips(i))).status_code for i in range(10, 14)]
+    assert codes == [200, 200, 200, 429]                                           # per email, even from different IPs
+    r = await client.post("/api/auth/forgot-password", json={"email": u.email}, headers=other_ips(99))
+    assert r.status_code == 429 and "Retry-After" in r.headers
+
+async def test_registration_is_limited_to_five_per_minute_per_ip(client):
+    codes = [(await client.post("/api/auth/register", json={"username": f"user{i}", "email": f"u{i}@example.com",
+                                                            "password": "Compl3x!P@ssword123"})).status_code for i in range(7)]
+    assert codes == [201] * 5 + [429, 429]
+
+async def test_reset_and_email_change_links_live_fifteen_minutes_and_expired_ones_are_refused(client, create_user, db_session, mail):
+    import datetime as dt
+    from sqlalchemy import select, update
+    from src.core.config import settings
+    from src.models.auth_tokens import PasswordResetToken
+    assert settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES == 15 and settings.EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES == 15
+    u, _ = await create_user(username="slow")
+    await client.post("/api/auth/forgot-password", json={"email": u.email})
+    row = (await db_session.execute(select(PasswordResetToken))).scalar_one()
+    life = (row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=dt.timezone.utc)) - dt.datetime.now(dt.timezone.utc)
+    assert dt.timedelta(minutes=14) < life <= dt.timedelta(minutes=15)
+    await db_session.execute(update(PasswordResetToken).values(expires_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)))
+    await db_session.commit()
+    r = await client.post("/api/auth/reset-password", json={"token": token_in(mail), "new_password": "Br@ndNewPass9"})
+    assert r.status_code == 400

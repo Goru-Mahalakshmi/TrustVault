@@ -3,6 +3,15 @@ from typing import Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+def normalize_db_url(url: str) -> str:
+    """Hosts such as Render hand out postgres:// or postgresql:// URLs; the app needs the asyncpg driver form."""
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    return url.replace("sslmode=", "ssl=")          # asyncpg spells it ssl=
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     ENVIRONMENT: str = "development"
@@ -13,16 +22,19 @@ class Settings(BaseSettings):
     SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 12
     MAX_FAILED_LOGIN_ATTEMPTS: int = 5
     LOCKOUT_DURATION_MINUTES: int = 15
-    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
-    EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES: int = 30
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 15
+    EMAIL_CHANGE_TOKEN_EXPIRE_MINUTES: int = 15
     TRUSTED_PROXIES: list[str] = ["127.0.0.1", "::1"]   # exact IPs or CIDR ranges, e.g. "172.16.0.0/12" for a Docker network
     ENABLE_DOCS: Optional[bool] = None   # interactive /docs; default: on in development, OFF in production
     RATE_LIMIT_LOGIN_PER_MIN: int = 5
-    RATE_LIMIT_REGISTER_PER_MIN: int = 10
+    RATE_LIMIT_REGISTER_PER_MIN: int = 5
+    RATE_LIMIT_FORGOT_PER_HOUR: int = 3
     RATE_LIMIT_REFUSALS_PER_MIN: int = 20
     RATE_LIMIT_GRANTS_PER_MIN: int = 10
     MASTER_KEY_B64: str = ""            # base64 of 32 random bytes; REQUIRED outside development
     STORAGE_DIR: str = "./storage"      # outside any web root; never mounted as static files
+    STORAGE_BACKEND: str = "disk"       # disk: encrypted files in STORAGE_DIR | db: encrypted blobs in PostgreSQL (hosts without a persistent disk)
+    RATE_LIMIT_UPLOADS_PER_MIN: int = 30
     MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024
     MAX_CONCURRENT_DECRYPTS: int = 10
     COOKIE_SECURE: bool = True          # browsers accept Secure cookies on http://localhost; set False only for odd setups
@@ -33,8 +45,39 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = "TrustVault <no-reply@trustvault.local>"
-    ANTHROPIC_API_KEY: str = ""         # optional: enables advisory grantee suggestions
-    AI_MODEL: str = "claude-sonnet-4-6"
+    # Advisory grantee suggestions are optional. Two provider styles:
+    #   anthropic          -> ANTHROPIC_API_KEY (+ optional AI_MODEL)
+    #   openai_compatible  -> AI_API_KEY + AI_BASE_URL + AI_MODEL (Groq, OpenRouter, Mistral, Gemini's compatibility endpoint, ...)
+    AI_PROVIDER: str = "anthropic"
+    ANTHROPIC_API_KEY: str = ""
+    AI_API_KEY: str = ""
+    AI_BASE_URL: str = ""               # must be https, e.g. https://api.groq.com/openai/v1
+    AI_MODEL: str = ""                  # required for openai_compatible; anthropic defaults to claude-sonnet-4-6
+
+    @model_validator(mode="after")
+    def _ai_settings(self):
+        if self.AI_PROVIDER not in ("anthropic", "openai_compatible"):
+            raise ValueError("AI_PROVIDER must be 'anthropic' or 'openai_compatible'")
+        if self.AI_BASE_URL and not self.AI_BASE_URL.startswith("https://"):
+            raise ValueError("AI_BASE_URL must start with https://")
+        return self
+
+    @property
+    def ai_model(self) -> str:
+        return self.AI_MODEL or ("claude-sonnet-4-6" if self.AI_PROVIDER == "anthropic" else "")
+
+    @property
+    def ai_configured(self) -> bool:
+        if self.AI_PROVIDER == "anthropic":
+            return bool(self.ANTHROPIC_API_KEY)
+        return bool(self.AI_API_KEY and self.AI_BASE_URL and self.AI_MODEL)
+
+    @model_validator(mode="after")
+    def _normalise(self):
+        self.DATABASE_URL = normalize_db_url(self.DATABASE_URL)
+        if self.STORAGE_BACKEND not in ("disk", "db"):
+            raise ValueError("STORAGE_BACKEND must be 'disk' or 'db'")
+        return self
 
     @model_validator(mode="after")
     def _production_guard_rails(self):

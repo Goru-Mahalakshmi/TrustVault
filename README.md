@@ -3,7 +3,7 @@
 Secure document sharing where the wrong person cannot reach a file and the record shows who did, including refused attempts.
 FastAPI + PostgreSQL, server-side sessions, per-document grants, AES-256-GCM encryption at rest, an HMAC-chained audit trail.
 
-**Live demo:** _add your URL here after deploying (see DEPLOY.md)_  |  **API reference:** `docs/API_REFERENCE.md` (generated from the code, with who may call each endpoint)
+**Live demo:** https://trustvault-m4jo.onrender.com  |  **API reference:** `docs/API_REFERENCE.md` (generated from the code, with who may call each endpoint)
 
 ## Demo accounts (public demo passwords; created by `python -m scripts.seed`)
 | User | Password | Role | Try this |

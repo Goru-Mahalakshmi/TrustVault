@@ -27,7 +27,7 @@ async def test_search_by_owner_category_and_date(actor):
     assert (await titles(a, "&owner=bob"))[0] == ["B1"]
     assert (await titles(a, "&owner=alice"))[0] == ["A1", "A2"]
     assert (await titles(a, "&category=hr"))[0] == ["A1", "B1"]
-    today = dt.date.today()
+    today = dt.datetime.now(dt.timezone.utc).date()
     assert len((await titles(a, f"&created_from={today}&created_to={today}"))[0]) == 3      # inclusive of 'today'
     assert (await titles(a, f"&created_to={today - dt.timedelta(days=1)}"))[0] == []
     assert (await titles(a, f"&created_from={today + dt.timedelta(days=1)}"))[0] == []

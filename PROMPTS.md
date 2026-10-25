@@ -22,7 +22,7 @@ This log tracks prompts, tool suggestions, critical evaluations, deviations, and
   2. Implemented **flat per-document grants** with zero inheritance. Folders/categories are strictly metadata labels for search filtering.
   3. Enforced **existence concealment**: `authorize()` returns an identical `404 Not Found` for nonexistent documents and ungranted documents.
   4. Designed an append-only audit trail with PostgreSQL role grant restrictions (`REVOKE UPDATE, DELETE`), an immutable trigger, and a cryptographic SHA-256 hash chain with anchor row locking.
-- **Git Commit:** 8cbea44
+- **Git Commit:** Unverified — hash not found in repository history (`8cbea44`)
 
 ### Entry 2: Phase 1 Revision - Hardening Architecture, Audit, Revocation & Admin Scope
 - **Date:** 2026-10-18
@@ -34,5 +34,4 @@ This log tracks prompts, tool suggestions, critical evaluations, deviations, and
   4. *Admin:* Removing direct password setting closes a major privilege abuse vector. Two-step ownership transfer eliminates malicious/unsolicited document dumping.
   5. *Existence & Rate Limiting:* Removing invented timing numbers and enforcing refusal rate limiting closes audit table flooding attacks.
 - **What We Did:** Updated `docs/ARCHITECTURE.md`, `docs/API.md`, `docs/ROLES.md`, and `THREATS.md`.
-- **Git Commit:** 219327d
-
+- **Git Commit:** Unverified — hash not found in repository history (`219327d`)
